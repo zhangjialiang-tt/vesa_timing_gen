@@ -2,7 +2,12 @@
 基本 UI 测试 - 验证 MainWindow 可以正确创建
 """
 import sys
+import os
 from PyQt5.QtWidgets import QApplication
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from vesa_timing_calculator import MainWindow
 
 

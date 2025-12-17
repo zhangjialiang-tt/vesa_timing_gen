@@ -2,8 +2,14 @@
 事件处理测试 - 验证信号槽连接和事件处理方法
 """
 import sys
+import sys
+import os
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from vesa_timing_calculator import MainWindow
 
 

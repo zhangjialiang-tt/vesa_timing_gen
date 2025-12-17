@@ -2,8 +2,14 @@
 错误显示测试 - 验证错误处理和显示功能
 """
 import sys
+import sys
+import os
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from vesa_timing_calculator import MainWindow, VesaCalculator
 
 

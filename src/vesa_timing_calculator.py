@@ -112,21 +112,22 @@ class VesaCalculator:
     RB_V_SYNC = 8  # 固定垂直同步脉冲行数
     RB_MIN_V_BPORCH = 6  # 最小垂直后廊行数
     
-    def calculate(self, h_active: int, v_active: int, 
+    def calculate(self, h_active: int, v_active: int,
                   refresh_rate: float = None, pixel_clock: float = None,
                   reduced_blanking: bool = False) -> dict:
         """
         计算 CVT 时序参数
         
-        支持两种计算模式：
+        支持三种计算模式：
         1. 正向计算：提供 refresh_rate，计算 pixel_clock 和其他参数
         2. 反向计算：提供 pixel_clock，计算 refresh_rate 和其他参数
+        3. 双参数计算：同时提供 refresh_rate 和 pixel_clock，计算时序参数
         
         参数:
             h_active: 水平有效像素 (640-7680)
             v_active: 垂直有效行数 (480-4320)
-            refresh_rate: 刷新率 Hz (24-240)，正向计算时必需
-            pixel_clock: 像素时钟 MHz，反向计算时必需
+            refresh_rate: 刷新率 Hz (24-240)，模式1和3时必需
+            pixel_clock: 像素时钟 MHz，模式2和3时必需
             reduced_blanking: 是否使用 CVT-RB 模式
             
         返回:
@@ -146,12 +147,6 @@ class VesaCalculator:
             }
         
         # 检查计算模式
-        if refresh_rate is not None and pixel_clock is not None:
-            return {
-                'error': True,
-                'message': '请只提供刷新率或像素时钟其中一个参数'
-            }
-        
         if refresh_rate is None and pixel_clock is None:
             return {
                 'error': True,
@@ -160,8 +155,23 @@ class VesaCalculator:
         
         # 根据模式选择计算方法
         try:
-            if refresh_rate is not None:
-                # 正向计算：从刷新率计算像素时钟
+            if refresh_rate is not None and pixel_clock is not None:
+                # 新增模式3：同时提供刷新率和像素时钟
+                if refresh_rate < 24.0 or refresh_rate > 240.0:
+                    return {
+                        'error': True,
+                        'message': f"刷新率必须在 24 到 240 Hz 之间，当前值: {refresh_rate}"
+                    }
+                
+                if pixel_clock <= 0:
+                    return {
+                        'error': True,
+                        'message': f"像素时钟必须大于零，当前值: {pixel_clock}"
+                    }
+                
+                return self._calculate_with_both_params(h_active, v_active, refresh_rate, pixel_clock, reduced_blanking)
+            elif refresh_rate is not None:
+                # 模式1：正向计算：从刷新率计算像素时钟
                 if refresh_rate < 24.0 or refresh_rate > 240.0:
                     return {
                         'error': True,
@@ -173,7 +183,7 @@ class VesaCalculator:
                 else:
                     return self._calculate_standard_cvt(h_active, v_active, refresh_rate)
             else:
-                # 反向计算：从像素时钟计算刷新率
+                # 模式2：反向计算：从像素时钟计算刷新率
                 if pixel_clock <= 0:
                     return {
                         'error': True,
@@ -547,6 +557,159 @@ class VesaCalculator:
 
 
 
+    def _calculate_with_both_params(self, h_active: int, v_active: int,
+                                   refresh_rate: float, pixel_clock: float,
+                                   reduced_blanking: bool = False) -> dict:
+        """
+        同时使用像素时钟和刷新率计算时序参数
+        
+        这种模式下，用户同时指定像素时钟和刷新率，
+        系统会计算相应的时序参数，确保两者兼容。
+        
+        参数:
+            h_active: 水平有效像素
+            v_active: 垂直有效行数
+            refresh_rate: 刷新率 Hz
+            pixel_clock: 像素时钟频率 MHz
+            reduced_blanking: 是否使用 CVT-RB 模式
+            
+        返回:
+            包含所有时序参数的字典
+        """
+        import math
+        
+        # 步骤 1: 确保水平分辨率是 CELL_GRAN 的倍数
+        h_active_rounded = (h_active // self.CELL_GRAN) * self.CELL_GRAN
+        
+        # 步骤 2: 计算理论上的总像素和总行数
+        # 根据像素时钟和刷新率计算理论上的总像素和总行数
+        # pixel_clock (MHz) = h_total * v_total * refresh_rate / 1,000,000
+        # h_total * v_total = pixel_clock * 1,000,000 / refresh_rate
+        total_pixels_times_lines = (pixel_clock * 1000000.0) / refresh_rate
+        
+        # 步骤 3: 根据模式选择消隐参数
+        if reduced_blanking:
+            # CVT-RB 模式：使用固定的消隐参数
+            h_blanking = self.RB_H_BLANK
+            h_sync_pulse = self.RB_H_SYNC
+            h_back_porch = 80
+            h_front_porch = h_blanking - h_sync_pulse - h_back_porch
+            h_total = h_active_rounded + h_blanking
+            
+            # 垂直时序参数
+            v_sync_pulse = self.RB_V_SYNC
+            v_front_porch = self.MIN_V_PORCH
+            
+            # 计算垂直消隐
+            # 使用迭代方法计算垂直消隐，以满足给定的像素时钟和刷新率
+            v_back_porch = self.RB_MIN_V_BPORCH
+            v_blanking = v_front_porch + v_sync_pulse + v_back_porch
+            v_total = v_active + v_blanking
+            
+            # 迭代调整垂直消隐，使计算结果与输入参数匹配
+            for _ in range(10):  # 最多迭代 10 次
+                # 计算当前配置下的像素时钟
+                calculated_pixel_clock = (h_total * v_total * refresh_rate) / 1000000.0
+                
+                # 如果计算出的像素时钟与输入值接近，则停止迭代
+                if abs(calculated_pixel_clock - pixel_clock) < 0.01:
+                    break
+                
+                # 调整垂直总行数以匹配像素时钟
+                target_v_total = total_pixels_times_lines / h_total
+                v_total = int(round(target_v_total))
+                v_blanking = v_total - v_active
+                
+                # 确保垂直消隐至少包含前廊和同步脉冲
+                min_v_blanking = v_front_porch + v_sync_pulse + self.RB_MIN_V_BPORCH
+                if v_blanking < min_v_blanking:
+                    v_blanking = min_v_blanking
+                    v_total = v_active + v_blanking
+                
+                # 重新计算垂直后廊
+                v_back_porch = v_blanking - v_front_porch - v_sync_pulse
+            
+        else:
+            # 标准 CVT 模式：使用标准的消隐参数
+            # 根据分辨率选择合适的水平消隐
+            if h_active_rounded <= 1024:
+                h_blank_pixels = 256
+            elif h_active_rounded <= 1280:
+                h_blank_pixels = 320
+            elif h_active_rounded <= 1920:
+                h_blank_pixels = 280
+            else:
+                h_blank_pixels = 288
+            
+            h_blanking = ((h_blank_pixels + self.CELL_GRAN - 1) // self.CELL_GRAN) * self.CELL_GRAN
+            h_total = h_active_rounded + h_blanking
+            
+            # 水平同步脉冲
+            h_sync_pulse = int(round(h_blanking * self.H_SYNC_PERCENT / 100.0))
+            h_sync_pulse = ((h_sync_pulse + self.CELL_GRAN - 1) // self.CELL_GRAN) * self.CELL_GRAN
+            
+            # 水平后廊和前廊
+            h_back_porch = (h_blanking // 2) - (h_sync_pulse // 2)
+            h_back_porch = (h_back_porch // self.CELL_GRAN) * self.CELL_GRAN
+            h_front_porch = h_blanking - h_sync_pulse - h_back_porch
+            
+            # 垂直时序参数
+            v_front_porch = self.MIN_V_PORCH
+            v_sync_pulse = 4
+            
+            # 计算垂直消隐
+            # 使用迭代方法计算垂直消隐，以满足给定的像素时钟和刷新率
+            v_back_porch = 10  # 初始估算
+            v_blanking = v_front_porch + v_sync_pulse + v_back_porch
+            v_total = v_active + v_blanking
+            
+            # 迭代调整垂直消隐，使计算结果与输入参数匹配
+            for _ in range(10):  # 最多迭代 10 次
+                # 计算当前配置下的像素时钟
+                calculated_pixel_clock = (h_total * v_total * refresh_rate) / 1000000.0
+                
+                # 如果计算出的像素时钟与输入值接近，则停止迭代
+                if abs(calculated_pixel_clock - pixel_clock) < 0.01:
+                    break
+                
+                # 调整垂直总行数以匹配像素时钟
+                target_v_total = total_pixels_times_lines / h_total
+                v_total = int(round(target_v_total))
+                v_blanking = v_total - v_active
+                
+                # 确保垂直消隐至少包含前廊和同步脉冲
+                min_v_blanking = v_front_porch + v_sync_pulse + 1
+                if v_blanking < min_v_blanking:
+                    v_blanking = min_v_blanking
+                    v_total = v_active + v_blanking
+                
+                # 重新计算垂直后廊
+                v_back_porch = v_blanking - v_front_porch - v_sync_pulse
+        
+        # 最终计算
+        v_blanking = v_front_porch + v_sync_pulse + v_back_porch
+        v_total = v_active + v_blanking
+        
+        # 计算实际像素时钟（应该与输入值非常接近）
+        actual_pixel_clock = (h_total * v_total * refresh_rate) / 1000000.0
+        
+        # 返回所有计算结果
+        return {
+            'pixel_clock': round(pixel_clock, 2),  # 使用输入的像素时钟
+            'refresh_rate': round(refresh_rate, 2),  # 使用输入的刷新率
+            'h_total': h_total,
+            'h_blanking': h_blanking,
+            'h_front_porch': h_front_porch,
+            'h_sync_pulse': h_sync_pulse,
+            'h_back_porch': h_back_porch,
+            'v_total': v_total,
+            'v_blanking': v_blanking,
+            'v_front_porch': v_front_porch,
+            'v_sync_pulse': v_sync_pulse,
+            'v_back_porch': v_back_porch,
+        }
+
+
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFormLayout,
     QGroupBox, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
@@ -615,6 +778,7 @@ class MainWindow(QMainWindow):
         self.mode_combobox = QComboBox()
         self.mode_combobox.addItem("从刷新率计算像素时钟")
         self.mode_combobox.addItem("从像素时钟计算刷新率")
+        self.mode_combobox.addItem("同时设置像素时钟和刷新率")
         layout.addRow("计算模式:", self.mode_combobox)
         
         # 水平分辨率 SpinBox (640-7680, 默认 1920)
@@ -717,6 +881,11 @@ class MainWindow(QMainWindow):
         self.copy_button = QPushButton("复制所有结果")
         layout.addWidget(self.copy_button)
         
+        # 生成 RTL 代码按钮
+        self.generate_rtl_button = QPushButton("生成 RTL 代码")
+        self.generate_rtl_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        layout.addWidget(self.generate_rtl_button)
+        
         group_box.setLayout(layout)
         return group_box
 
@@ -740,6 +909,9 @@ class MainWindow(QMainWindow):
         
         # 复制按钮点击事件
         self.copy_button.clicked.connect(self._copy_results)
+        
+        # 生成 RTL 代码按钮点击事件
+        self.generate_rtl_button.clicked.connect(self._generate_rtl_code)
     
     def _on_mode_changed(self, index: int):
         """
@@ -751,14 +923,19 @@ class MainWindow(QMainWindow):
             index: 模式下拉菜单的索引
                    0 = 从刷新率计算像素时钟
                    1 = 从像素时钟计算刷新率
+                   2 = 同时设置像素时钟和刷新率
         """
         if index == 0:
             # 模式 0: 从刷新率计算像素时钟
             self.refresh_rate_spinbox.setEnabled(True)
             self.pixel_clock_spinbox.setEnabled(False)
-        else:
+        elif index == 1:
             # 模式 1: 从像素时钟计算刷新率
             self.refresh_rate_spinbox.setEnabled(False)
+            self.pixel_clock_spinbox.setEnabled(True)
+        else:
+            # 模式 2: 同时设置像素时钟和刷新率
+            self.refresh_rate_spinbox.setEnabled(True)
             self.pixel_clock_spinbox.setEnabled(True)
         
         # 触发重新计算
@@ -789,12 +966,23 @@ class MainWindow(QMainWindow):
                     refresh_rate=refresh_rate,
                     reduced_blanking=reduced_blanking
                 )
-            else:
+            elif mode == 1:
                 # 模式 1: 从像素时钟计算刷新率
                 pixel_clock = self.pixel_clock_spinbox.value()
                 results = self.calculator.calculate(
                     h_active=h_active,
                     v_active=v_active,
+                    pixel_clock=pixel_clock,
+                    reduced_blanking=reduced_blanking
+                )
+            else:
+                # 模式 2: 同时设置像素时钟和刷新率
+                refresh_rate = self.refresh_rate_spinbox.value()
+                pixel_clock = self.pixel_clock_spinbox.value()
+                results = self.calculator.calculate(
+                    h_active=h_active,
+                    v_active=v_active,
+                    refresh_rate=refresh_rate,
                     pixel_clock=pixel_clock,
                     reduced_blanking=reduced_blanking
                 )
@@ -807,12 +995,15 @@ class MainWindow(QMainWindow):
                 # 更新结果表格
                 self._update_results_table(results)
                 
-                # 如果是反向计算，更新刷新率显示
+                # 如果是反向计算或双参数计算，更新显示
                 if mode == 1 and 'refresh_rate' in results:
                     # 临时禁用信号避免循环触发
                     self.refresh_rate_spinbox.blockSignals(True)
                     self.refresh_rate_spinbox.setValue(results['refresh_rate'])
                     self.refresh_rate_spinbox.blockSignals(False)
+                elif mode == 2:
+                    # 模式 2: 双参数计算，不需要更新显示，因为两个参数都是输入
+                    pass
                 
                 # 恢复状态栏正常样式（清除之前的错误样式）
                 self.statusBar().setStyleSheet("")
@@ -863,16 +1054,30 @@ class MainWindow(QMainWindow):
             self.h_active_spinbox.blockSignals(True)
             self.v_active_spinbox.blockSignals(True)
             self.refresh_rate_spinbox.blockSignals(True)
+            self.pixel_clock_spinbox.blockSignals(True)
             
             # 填充输入框
             self.h_active_spinbox.setValue(h_active)
             self.v_active_spinbox.setValue(v_active)
             self.refresh_rate_spinbox.setValue(refresh_rate)
             
+            # 根据预设计算像素时钟
+            # 使用标准 CVT 算法计算像素时钟
+            temp_results = self.calculator.calculate(
+                h_active=h_active,
+                v_active=v_active,
+                refresh_rate=refresh_rate,
+                reduced_blanking=self.reduced_blanking_checkbox.isChecked()
+            )
+            
+            if 'pixel_clock' in temp_results and not temp_results.get('error', False):
+                self.pixel_clock_spinbox.setValue(temp_results['pixel_clock'])
+            
             # 恢复信号
             self.h_active_spinbox.blockSignals(False)
             self.v_active_spinbox.blockSignals(False)
             self.refresh_rate_spinbox.blockSignals(False)
+            self.pixel_clock_spinbox.blockSignals(False)
             
             # 触发计算
             self._on_calculate()
@@ -972,6 +1177,104 @@ class MainWindow(QMainWindow):
         
         # 显示确认消息
         self.statusBar().showMessage("结果已复制到剪贴板", 3000)
+    
+    def _generate_rtl_code(self):
+        """
+        生成 RTL 代码
+        
+        根据当前的计算结果生成 Verilog RTL 代码和测试平台，
+        保存到 ./output 目录。
+        """
+        import os
+        from vesa_timing_rtl_template import generate_verilog_rtl, generate_testbench
+        
+        # 检查是否有计算结果
+        has_results = False
+        for i in range(11):
+            if self.results_table.item(i, 1).text():
+                has_results = True
+                break
+        
+        if not has_results:
+            self.statusBar().showMessage("请先计算时序参数", 3000)
+            return
+        
+        try:
+            # 收集当前的时序参数
+            timing_params = {}
+            
+            # 从输入框获取基本参数
+            timing_params['h_active'] = self.h_active_spinbox.value()
+            timing_params['v_active'] = self.v_active_spinbox.value()
+            
+            # 从结果表格提取参数
+            param_keys = [
+                'pixel_clock', 'h_total', 'h_blanking', 'h_front_porch',
+                'h_sync_pulse', 'h_back_porch', 'v_total', 'v_blanking',
+                'v_front_porch', 'v_sync_pulse', 'v_back_porch'
+            ]
+            
+            for i, key in enumerate(param_keys):
+                value_text = self.results_table.item(i, 1).text()
+                if value_text:
+                    # 提取数值（去除单位）
+                    value_str = value_text.split()[0]
+                    if key == 'pixel_clock':
+                        timing_params[key] = float(value_str)
+                    else:
+                        timing_params[key] = int(value_str)
+            
+            # 获取刷新率
+            mode = self.mode_combobox.currentIndex()
+            if mode == 0:
+                timing_params['refresh_rate'] = self.refresh_rate_spinbox.value()
+            else:
+                # 反向计算模式，刷新率已经在结果中
+                timing_params['refresh_rate'] = self.refresh_rate_spinbox.value()
+            
+            # 创建输出目录
+            output_dir = "./output"
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            # 生成文件名
+            h_active = timing_params['h_active']
+            v_active = timing_params['v_active']
+            refresh_rate = timing_params['refresh_rate']
+            module_name = f"vesa_timing_{h_active}x{v_active}_{int(refresh_rate)}hz"
+            
+            # 生成 RTL 代码
+            rtl_code = generate_verilog_rtl(timing_params, module_name)
+            rtl_filename = os.path.join(output_dir, f"{module_name}.v")
+            
+            with open(rtl_filename, 'w', encoding='utf-8') as f:
+                f.write(rtl_code)
+            
+            # 生成测试平台
+            tb_code = generate_testbench(timing_params, module_name)
+            tb_filename = os.path.join(output_dir, f"tb_{module_name}.v")
+            
+            with open(tb_filename, 'w', encoding='utf-8') as f:
+                f.write(tb_code)
+            
+            # 显示成功消息
+            success_msg = f"RTL 代码已生成:\n{rtl_filename}\n{tb_filename}"
+            self.statusBar().showMessage(f"RTL 代码已生成到 {output_dir} 目录", 5000)
+            
+            # 弹出成功对话框
+            from PyQt5.QtWidgets import QMessageBox
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("生成成功")
+            msg_box.setText("RTL 代码生成成功！")
+            msg_box.setInformativeText(success_msg)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.exec_()
+            
+        except Exception as e:
+            error_message = f"生成 RTL 代码时发生错误: {str(e)}"
+            self.statusBar().showMessage(error_message, 5000)
+            self.statusBar().setStyleSheet("QStatusBar { color: red; }")
 
 
 if __name__ == "__main__":

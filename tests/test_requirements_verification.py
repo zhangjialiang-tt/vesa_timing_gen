@@ -2,7 +2,12 @@
 需求验证测试 - 验证任务 6 的所有需求
 """
 import sys
+import os
 from PyQt5.QtWidgets import QApplication
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from vesa_timing_calculator import MainWindow
 
 

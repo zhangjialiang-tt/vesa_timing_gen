@@ -2,6 +2,12 @@
 测试反向计算功能：从像素时钟计算刷新率
 """
 
+import sys
+import os
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from vesa_timing_calculator import VesaCalculator
 
 def test_reverse_calculation():
